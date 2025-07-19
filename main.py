@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
-from reflection.routes import router as reflection_router
 from virtual_tryon.routes import router as tryon_router
 
 app = FastAPI(title="Astra Python Microservices", version="1.0.0")
@@ -48,7 +47,6 @@ async def health_check():
         "services": ["reflection", "virtual_try_on"]
     }
 
-app.include_router(reflection_router)
 app.include_router(tryon_router)
 
 @app.get("/test")
