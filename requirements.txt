@@ -1,0 +1,39 @@
+# Core Web Framework
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+python-multipart>=0.0.6
+
+# Background Task Processing
+celery>=5.4.0
+redis>=4.6.0
+
+# Image Processing
+pillow>=10.2.0
+rembg>=2.0.55
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+
+# Computer Vision and AI
+numpy>=1.26.4
+openai>=1.0.0
+onnxruntime>=1.15.0
+
+# HTTP and Async
+requests>=2.31.0
+aiohttp>=3.8.0
+
+# Data Validation and Serialization
+pydantic>=2.0.0
+
+# Environment and Configuration
+python-dotenv>=1.0.0
+
+# Development and Code Quality
+black>=25.1.0
+
+# Optional: Additional dependencies for enhanced functionality
+# Uncomment if needed for specific use cases
+# tensorflow>=2.13.0  # For advanced ML models
+# torch>=2.0.0       # For PyTorch-based models
+# scikit-image>=0.21.0  # For additional image processing
+# scipy>=1.11.0      # For scientific computing
