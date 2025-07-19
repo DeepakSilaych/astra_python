@@ -52,6 +52,7 @@ async def process_virtual_try_on(request: VirtualTryOnRequest):
             "success": True,
             "processed_jewelry_url": result["processed_jewelry_url"],
             "processed_jewelry_with_bg_url": result["processed_jewelry_with_bg_url"],
+            "model_image_url": result["model_image_url"],
             "landmark_position": result["landmark_position"],
             "jewelry_size": result.get("jewelry_size"),
             "temp_file_ids": result.get("temp_file_ids", []),

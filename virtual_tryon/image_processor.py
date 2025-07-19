@@ -548,6 +548,17 @@ class ImageProcessor:
             
             print(f"[ImageProcessor] Downloaded images: jewelry ({len(jewelry_data)} bytes), model ({len(model_data)} bytes)")
             
+            model_img = Image.open(model_temp_path)
+            original_width, original_height = model_img.size
+            zoom_factor = 1.2
+            new_width = int(original_width * zoom_factor)
+            new_height = int(original_height * zoom_factor)
+            zoomed_model = model_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as zoomed_model_temp:
+                zoomed_model.save(zoomed_model_temp.name, format='PNG')
+                zoomed_model_temp_path = zoomed_model_temp.name
+            
             cropped_jewelry = crop_jewelry_image(jewelry_temp_path, jewelry_type)
             if cropped_jewelry is None:
                 cropped_jewelry = Image.open(jewelry_temp_path).convert("RGB")
@@ -558,7 +569,7 @@ class ImageProcessor:
             else:
                 final_jewelry = cropped_jewelry
 
-            model_height_mm = get_image_height_mm(model_temp_path, jewelry_type)
+            model_height_mm = get_image_height_mm(zoomed_model_temp_path, jewelry_type)
             
             if jewelry_size and isinstance(jewelry_size, dict):
                 jewelry_size_str = jewelry_size.get('size', '20mm')
@@ -599,10 +610,10 @@ class ImageProcessor:
             
             print(f"[ImageProcessor] Jewelry resized: {jewelry_width_px}x{jewelry_height_px} -> {new_jewelry_width}x{new_jewelry_height} (scale: {scale_factor:.2f})")
             
-            landmark_position = get_jewelry_placement_position(model_temp_path, jewelry_type)
+            landmark_position = get_jewelry_placement_position(zoomed_model_temp_path, jewelry_type)
             
             if not isinstance(landmark_position, dict):
-                model_img = Image.open(model_temp_path)
+                model_img = Image.open(zoomed_model_temp_path)
                 width, height = model_img.size
                 
                 jt = jewelry_type.lower()
@@ -621,10 +632,8 @@ class ImageProcessor:
             processed_jewelry_with_bg_url = None
             
             try:
-                # Convert processed images to base64 data URLs
                 import base64
                 
-                # Convert the processed jewelry image to base64
                 jewelry_bytes = io.BytesIO()
                 resized_jewelry.save(jewelry_bytes, format='PNG')
                 jewelry_bytes.seek(0)
@@ -633,6 +642,12 @@ class ImageProcessor:
                 processed_jewelry_url = f"data:image/png;base64,{jewelry_base64}"
                 processed_jewelry_with_bg_url = f"data:image/png;base64,{jewelry_base64}"
                 
+                model_bytes = io.BytesIO()
+                zoomed_model.save(model_bytes, format='PNG')
+                model_bytes.seek(0)
+                model_base64 = base64.b64encode(model_bytes.getvalue()).decode('utf-8')
+                model_image_url = f"data:image/png;base64,{model_base64}"
+                
                 print(f"[ImageProcessor] Created base64 data URLs for processed images")
                 
             except Exception as e:
@@ -640,9 +655,10 @@ class ImageProcessor:
                 print("[ImageProcessor] Using original image URLs as fallback")
                 processed_jewelry_url = jewelry_image_url
                 processed_jewelry_with_bg_url = jewelry_image_url
+                model_image_url = model_image_url
 
             try:
-                temp_files = [jewelry_temp_path, model_temp_path]
+                temp_files = [jewelry_temp_path, model_temp_path, zoomed_model_temp_path]
                 for temp_file in temp_files:
                     if temp_file and os.path.exists(temp_file):
                         os.unlink(temp_file)
@@ -652,6 +668,7 @@ class ImageProcessor:
             result = convert_numpy_types({
                 'processed_jewelry_url': processed_jewelry_url,
                 'processed_jewelry_with_bg_url': processed_jewelry_with_bg_url,
+                'model_image_url': model_image_url,
                 'landmark_position': landmark_position,
                 'jewelry_type': jewelry_type,
                 'jewelry_subtype': jewelry_subtype,
