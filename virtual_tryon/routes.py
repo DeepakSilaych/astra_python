@@ -31,7 +31,7 @@ router = APIRouter(prefix="/virtual-try-on", tags=["virtual-try-on"])
 @router.post("/process")
 async def process_virtual_try_on(request: VirtualTryOnRequest):
     try:
-        logger.info(f"[VirtualTryOn] Processing request: {request.jewelry_type}/{request.jewelry_subtype}")
+        logger.info(f"[VirtualTryOn] Processing request: {request}")
         
         processor = ImageProcessor()
         

@@ -183,39 +183,238 @@ def enhance_jewelry_image_from_pil(img: Image.Image) -> Optional[Image.Image]:
         print(f"Image enhancement failed: {str(e)}")
         return None
 
-def get_image_height_mm(model_image_path, jewelry_type):
-    """Estimate model image height using OpenAI o3 vision model"""
-    with open(model_image_path, "rb") as image_file:
-        image_data = base64.b64encode(image_file.read()).decode('utf-8')
-    
-    prompt = """Place jewelry on model. Estimate image height in mm. Return only the number."""
-    
-    response = openai.chat.completions.create(
-        model="o3",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
-                ]
-            }
-        ],
-    )
-    
+def get_image_height_cm_mediapipe_fallback(model_image_path, jewelry_type):
+    """Estimate image height using MediaPipe landmark distances as fallback"""
     try:
+        img = cv2.imread(model_image_path)
+        if img is None:
+            return None
+        
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        height, width = img.shape[:2]
+        
+        # Standard human proportions (in cm) for a 170cm person
+        standard_eye_distance = 6.5  # cm between eyes
+        standard_shoulder_width = 45  # cm shoulder width
+        standard_nose_to_lip = 2.5  # cm nose to lip
+        standard_ear_to_ear = 15  # cm ear to ear
+        
+        with mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5
+        ) as face_mesh, mp.solutions.pose.Pose(
+            static_image_mode=True,
+            model_complexity=1,
+            enable_segmentation=False,
+            min_detection_confidence=0.3
+        ) as pose:
+            
+            face_results = face_mesh.process(rgb)
+            pose_results = pose.process(rgb)
+            
+            measurements = []
+            
+            # Face measurements
+            if face_results.multi_face_landmarks:
+                landmarks = face_results.multi_face_landmarks[0].landmark
+                
+                # Eye distance (landmarks 33 and 263)
+                left_eye = landmarks[33]
+                right_eye = landmarks[263]
+                eye_distance_px = np.sqrt((left_eye.x - right_eye.x)**2 + (left_eye.y - right_eye.y)**2) * width
+                if eye_distance_px > 10:  # Minimum threshold
+                    eye_scale = standard_eye_distance / eye_distance_px
+                    measurements.append(eye_scale)
+                
+                # Nose to lip distance (landmarks 1 and 13)
+                nose_tip = landmarks[1]
+                upper_lip = landmarks[13]
+                nose_lip_distance_px = np.sqrt((nose_tip.x - upper_lip.x)**2 + (nose_tip.y - upper_lip.y)**2) * height
+                if nose_lip_distance_px > 5:  # Minimum threshold
+                    nose_lip_scale = standard_nose_to_lip / nose_lip_distance_px
+                    measurements.append(nose_lip_scale)
+                
+                # Ear to ear distance (landmarks 234 and 454)
+                left_ear = landmarks[234]
+                right_ear = landmarks[454]
+                ear_distance_px = np.sqrt((left_ear.x - right_ear.x)**2 + (left_ear.y - right_ear.y)**2) * width
+                if ear_distance_px > 20:  # Minimum threshold
+                    ear_scale = standard_ear_to_ear / ear_distance_px
+                    measurements.append(ear_scale)
+            
+            # Body measurements
+            if pose_results.pose_landmarks:
+                landmarks = pose_results.pose_landmarks.landmark
+                
+                # Shoulder width (landmarks 11 and 12)
+                left_shoulder = landmarks[11]
+                right_shoulder = landmarks[12]
+                if left_shoulder.visibility > 0.5 and right_shoulder.visibility > 0.5:
+                    shoulder_distance_px = np.sqrt((left_shoulder.x - right_shoulder.x)**2 + (left_shoulder.y - right_shoulder.y)**2) * width
+                    if shoulder_distance_px > 30:  # Minimum threshold
+                        shoulder_scale = standard_shoulder_width / shoulder_distance_px
+                        measurements.append(shoulder_scale)
+            
+            if measurements:
+                # Use median scale to avoid outliers
+                median_scale = np.median(measurements)
+                image_height_cm = height * median_scale
+                
+                print(f"[MediaPipe] Estimated image height: {image_height_cm:.1f}cm using {len(measurements)} measurements")
+                print(f"[MediaPipe] Scale factors: {[f'{m:.3f}' for m in measurements]}")
+                
+                return image_height_cm
+        
+        return None
+        
+    except Exception as e:
+        print(f"MediaPipe height estimation failed: {str(e)}")
+        return None
+
+def get_image_height_cm(model_image_path, jewelry_type):
+    """Estimate model image height using OpenAI o3 vision model with MediaPipe fallback"""
+    try:
+        return get_image_height_cm_mediapipe_fallback(model_image_path, jewelry_type)
+        with open(model_image_path, "rb") as image_file:
+            image_data = base64.b64encode(image_file.read()).decode('utf-8')
+        
+        prompt = f"""`You are an Export Forensic Expert. 
+        Analyze the model image, postion and spacing of body landmarks.
+        Estimate image of the image by visible person.
+
+
+        Chain of thought:
+        1. Assume model is 140 cm tall.
+        2. Analyze the model image, postion and spacing of body landmarks.
+        3. Estimate size of the image by the amount of visible person and space it takes in the image.
+
+        return this format separated by ||
+        "thought process" || height in cm
+        Do not include any other text in your response. 
+`
+        Example:
+        "Distance between neck and shoulder is 10 cm. Neck is 10 cm from the top of the image. So, height of the person is 140 cm. Since she is visible till shoulder then the height of the image should be 40 cm. " || "40"
+
+        Do not include any other text in your response. 
+        """
+
+        response = openai.chat.completions.create(
+            model="o3",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
+                    ]
+                }
+            ],
+        )
+        
+        
         height_str = response.choices[0].message.content.strip()
-        height_mm = float(''.join(filter(str.isdigit, height_str.split('.')[0])))
-        return height_mm
-    except:
-        fallback_heights = {
-            "necklaces": 300,
-            "earrings": 200,
-            "bracelets": 150,
-            "rings": 100
-        }
-        fallback_height = fallback_heights.get(jewelry_type, 200)
-        return fallback_height
+        print(f"Model Image Height: {height_str}")
+
+        height_value = height_str.split("||")[1].strip()
+        if height_value.startswith('"') and height_value.endswith('"'):
+            height_value = height_value[1:-1]
+        height_cm = float(height_value)
+        
+        return height_cm
+    except Exception as e:
+        print(f"OpenAI height estimation failed: {str(e)}")
+        
+        # Try MediaPipe fallback first
+        mediapipe_height = get_image_height_cm_mediapipe_fallback(model_image_path, jewelry_type)
+        if mediapipe_height:
+            return mediapipe_height
+        
+        # Geometric fallback as last resort
+        img = Image.open(model_image_path)
+        width, height = img.size
+        
+        jewelry_type_lower = jewelry_type.lower()
+        
+        if jewelry_type_lower in ['earring', 'earrings']:
+            if height > width:
+                return 25
+            else:
+                return 20
+        elif jewelry_type_lower in ['necklace', 'necklaces', 'pendant']:
+            if height > width:
+                return 35
+            else:
+                return 30
+        elif jewelry_type_lower in ['bracelet', 'bracelets', 'bangles']:
+            if height > width:
+                return 25
+            else:
+                return 20
+        elif jewelry_type_lower in ['ring', 'rings']:
+            if height > width:
+                return 20
+            else:
+                return 15
+        else:
+            return 25
+
+def get_jewelry_size_cm(jewelry_size_input, jewelry_image_path=None, jewelry_type="jewelry"):
+    """Get jewelry size in cm from user input or predict from image using OpenAI"""
+    if jewelry_size_input:
+        try:
+            prompt = (
+                f"Given the following description for a {jewelry_type}, extract the vertical height of this jewelry in centimeters."
+                f"If no units are mentioned, assume mm."
+                f"Return only the number (in cm). Description: "
+                f"{jewelry_size_input}"
+            )
+            response = openai.chat.completions.create(
+                model="o3",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt}
+                        ]
+                    }
+                ],
+            )
+            height_str = response.choices[0].message.content.strip()
+            number_match = re.search(r'(\d+\.?\d*)', height_str)
+            if number_match:
+                return float(number_match.group(1))
+        except Exception as e:
+            pass
+    
+    if jewelry_image_path and os.path.exists(jewelry_image_path):
+        try:
+            with open(jewelry_image_path, "rb") as image_file:
+                image_data = base64.b64encode(image_file.read()).decode('utf-8')
+    
+            prompt = """Estimate the vertical height of this jewelry in centimeters. Return only the number."""
+    
+            response = openai.chat.completions.create(
+                model="o3",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
+                        ]
+                    }
+                ],
+            )
+            
+            height_str = response.choices[0].message.content.strip()
+            height_cm = float(''.join(filter(str.isdigit, height_str.split('.')[0])))
+            return height_cm
+        except:
+            pass
+    
+    return 2.0
 
 def calculate_jewelry_size_mm(jewelry_size_str):
     """Parse jewelry size string and convert to millimeters"""
@@ -409,20 +608,35 @@ def convert_numpy_types(obj):
 def get_jewelry_placement_position(model_image_path, jewelry_type):
     position = None
     landmarks_data = None
-    if jewelry_type in "earrings":
+    
+    jewelry_type_lower = jewelry_type.lower()
+    
+    if jewelry_type_lower in ['earring', 'earrings']:
         position = get_earring_position_haar(model_image_path)
-    elif jewelry_type in "necklaces" or jewelry_type in "pendants":
+        if position:
+            print(f"[Landmark] Ear detected using Haar cascade - {position}")
+            return position
+        
+        position = get_earring_position_mediapipe(model_image_path)
+        if position:
+            print(f"[Landmark] Ear detected using MediaPipe Face Mesh - {position}")
+            return position
+            
+    elif jewelry_type_lower in ['necklace', 'necklaces', 'pendant']:
         position, landmarks_data = detect_neck_mediapipe(model_image_path)
-    elif jewelry_type in "bracelets" or jewelry_type in "bangles":
+    elif jewelry_type_lower in ['bracelet', 'bracelets', 'bangles']:
         position, landmarks_data = detect_wrist_mediapipe(model_image_path)
-    elif jewelry_type in "rings":
+    elif jewelry_type_lower in ['ring', 'rings']:
         position, landmarks_data = detect_finger_mediapipe(model_image_path)
+    
     if position:
         return position
+    
+    # Geometric fallback
     try:
         model_img = Image.open(model_image_path)
         width, height = model_img.size
-        jewelry_type_lower = jewelry_type.lower()
+
         if jewelry_type_lower in ['necklace', 'necklaces', 'pendant']:
             fallback_pos = {'x': width // 2, 'y': height // 3, 'confidence': 0.3, 'method': 'geometric_fallback'}
         elif jewelry_type_lower in ['earring', 'earrings']:
@@ -433,9 +647,118 @@ def get_jewelry_placement_position(model_image_path, jewelry_type):
             fallback_pos = {'x': int(width * 0.6), 'y': int(height * 0.8), 'confidence': 0.3, 'method': 'geometric_fallback'}
         else:
             fallback_pos = {'x': width // 2, 'y': height // 2, 'confidence': 0.2, 'method': 'geometric_fallback'}
+    
+        print(f"[Landmark] Using geometric fallback - {fallback_pos}")
         return fallback_pos
+        
     except Exception as e:
         print(f"Geometric fallback error: {e}")
+        return None
+
+def calculate_zoom_factor(model_img, jewelry_img, landmark_position, jewelry_type):
+    """Calculate optimal zoom factor based on jewelry size relative to model image"""
+    model_width, model_height = model_img.size
+    jewelry_width, jewelry_height = jewelry_img.size
+    
+    model_area = model_width * model_height
+    jewelry_area = jewelry_width * jewelry_height
+    
+    jewelry_ratio = jewelry_area / model_area
+    
+    max_zoom_ratio = 0.05
+    
+    if jewelry_ratio >= max_zoom_ratio:
+        zoom_factor = 0.8
+        print(f"[Zoom] Jewelry ratio {jewelry_ratio:.3f} >= {max_zoom_ratio}, applying max zoom")
+    else:
+        zoom_factor = 1.0 - (jewelry_ratio * 10)
+        zoom_factor = max(0.8, min(0.95, zoom_factor))
+        print(f"[Zoom] Jewelry ratio {jewelry_ratio:.3f} < {max_zoom_ratio}, calculated zoom: {zoom_factor:.3f}")
+    
+    return zoom_factor
+
+def apply_zoom_to_landmark(model_img, landmark_position, zoom_factor):
+    """Apply zoom transformation towards the landmark position"""
+    original_width, original_height = model_img.size
+    zoom_center_x = landmark_position['x']
+    zoom_center_y = landmark_position['y']
+    
+    # Calculate new dimensions after zoom
+    new_width = int(original_width * zoom_factor)
+    new_height = int(original_height * zoom_factor)
+    
+    # Calculate crop box to center on landmark
+    crop_left = max(0, zoom_center_x - new_width // 2)
+    crop_top = max(0, zoom_center_y - new_height // 2)
+    crop_right = min(original_width, crop_left + new_width)
+    crop_bottom = min(original_height, crop_top + new_height)
+    
+    # Crop and resize to original size
+    cropped = model_img.crop((crop_left, crop_top, crop_right, crop_bottom))
+    zoomed_model = cropped.resize((original_width, original_height), Image.BICUBIC)
+    
+    return zoomed_model
+
+def get_earring_position_mediapipe(image_path):
+    """Detect ear position using MediaPipe Face Mesh and return ear lobe position for earring placement"""
+    img = cv2.imread(image_path)
+    if img is None:
+                return None
+    
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    height, width = img.shape[:2]
+    
+    try:
+        with mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5
+        ) as face_mesh:
+            results = face_mesh.process(rgb)
+            
+            if not results.multi_face_landmarks:
+                return None
+    
+            landmarks = results.multi_face_landmarks[0].landmark
+            
+            # MediaPipe Face Mesh ear lobe landmarks
+            # Left ear lobe: 234, Right ear lobe: 454
+            left_ear_lobe = landmarks[234]
+            right_ear_lobe = landmarks[454]
+            
+            # Convert to pixel coordinates
+            left_x = int(left_ear_lobe.x * width)
+            left_y = int(left_ear_lobe.y * height)
+            right_x = int(right_ear_lobe.x * width)
+            right_y = int(right_ear_lobe.y * height)
+            
+            # Choose the ear that's more visible (closer to center)
+            center_x = width // 2
+            left_distance = abs(left_x - center_x)
+            right_distance = abs(right_x - center_x)
+            
+            if left_distance < right_distance:
+                ear_x, ear_y = left_x, left_y
+                ear_side = "left"
+            else:
+                ear_x, ear_y = right_x, right_y
+                ear_side = "right"
+            
+            # Calculate confidence based on landmark visibility
+            confidence = 0.8  # MediaPipe landmarks are generally reliable
+            
+            position = {
+                'x': ear_x, 
+                'y': ear_y, 
+                'confidence': confidence, 
+                'method': 'mediapipe_face_mesh'
+            }
+            
+            return position
+            
+    except Exception as e:
+        print(f"MediaPipe ear detection error: {e}")
         return None
 
 def get_earring_position_haar(image_path):
@@ -490,7 +813,7 @@ def get_earring_position_haar(image_path):
             if confidence > best_confidence:
                 best_confidence = confidence
                 ear_x = x + int(w * 0.75)
-                ear_y = y + h
+                ear_y = y + h - 10
                 best_ear = {'x': ear_x, 'y': ear_y, 'confidence': confidence, 'method': 'haar_cascade'}
                 ear_side = "left"
         
@@ -501,7 +824,7 @@ def get_earring_position_haar(image_path):
             if confidence > best_confidence:
                 best_confidence = confidence
                 ear_x = x + int(w * 0.25)
-                ear_y = y + h
+                ear_y = y + h - 10
                 best_ear = {'x': ear_x, 'y': ear_y, 'confidence': confidence, 'method': 'haar_cascade'}
                 ear_side = "right"
         
@@ -528,106 +851,78 @@ class ImageProcessor:
     ) -> dict:
         try:
             print(f"[ImageProcessor] Processing {jewelry_type}/{jewelry_subtype} virtual try-on")
-            async with aiohttp.ClientSession() as session:
-                async with session.get(jewelry_image_url) as response:
-                    if response.status != 200:
-                        raise Exception(f"Failed to download jewelry image: {response.status}")
-                    jewelry_data = await response.read()
-                async with session.get(model_image_url) as response:
-                    if response.status != 200:
-                        raise Exception(f"Failed to download model image: {response.status}")
-                    model_data = await response.read()
+            if jewelry_image_url.startswith('file://'):
+                jewelry_image_path = jewelry_image_url[7:]
+                with open(jewelry_image_path, 'rb') as f:
+                    jewelry_data = f.read()
+            else:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(jewelry_image_url) as response:
+                        if response.status != 200:
+                            raise Exception(f"Failed to download jewelry image: {response.status}")
+                        jewelry_data = await response.read()
+            
+            if model_image_url.startswith('file://'):
+                model_image_path = model_image_url[7:]
+                with open(model_image_path, 'rb') as f:
+                    model_data = f.read()
+            else:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(model_image_url) as response:
+                        if response.status != 200:
+                            raise Exception(f"Failed to download model image: {response.status}")
+                        model_data = await response.read()
+            print(f"[ImageProcessor] Step 1: Downloaded images - jewelry: {len(jewelry_data)} bytes, model: {len(model_data)} bytes")
             
             with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as jewelry_temp:
                 jewelry_temp.write(jewelry_data)
                 jewelry_temp_path = jewelry_temp.name
-            
             with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as model_temp:
                 model_temp.write(model_data)
                 model_temp_path = model_temp.name
-            
-            print(f"[ImageProcessor] Downloaded images: jewelry ({len(jewelry_data)} bytes), model ({len(model_data)} bytes)")
+            print(f"[ImageProcessor] Step 2: Created temp files - jewelry: {jewelry_temp_path}, model: {model_temp_path}")
             
             model_img = Image.open(model_temp_path)
             original_width, original_height = model_img.size
-            zoom_factor = 1.2
-            new_width = int(original_width * zoom_factor)
-            new_height = int(original_height * zoom_factor)
-            zoomed_model = model_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as zoomed_model_temp:
-                zoomed_model.save(zoomed_model_temp.name, format='PNG')
-                zoomed_model_temp_path = zoomed_model_temp.name
+            landmark_position = get_jewelry_placement_position(model_temp_path, jewelry_type)
+            print(f"[ImageProcessor] Step 3: Detected landmark position - {landmark_position}")
             
             cropped_jewelry = crop_jewelry_image(jewelry_temp_path, jewelry_type)
             if cropped_jewelry is None:
                 cropped_jewelry = Image.open(jewelry_temp_path).convert("RGB")
+            print(f"[ImageProcessor] Step 4: Initial jewelry processing - size: {cropped_jewelry.size}")
             
-            enhanced_jewelry = enhance_jewelry_image_from_pil(cropped_jewelry)
-            if enhanced_jewelry:
-                final_jewelry = enhanced_jewelry
-            else:
-                final_jewelry = cropped_jewelry
-
-            model_height_mm = get_image_height_mm(zoomed_model_temp_path, jewelry_type)
+            initial_zoom_factor = 0.7
+            initial_zoomed_model = apply_zoom_to_landmark(model_img, landmark_position, initial_zoom_factor)
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as initial_zoomed_temp:
+                initial_zoomed_model.save(initial_zoomed_temp.name, format='PNG')
+                initial_zoomed_temp_path = initial_zoomed_temp.name
+            print(f"[ImageProcessor] Step 5: Applied initial 20% zoom - {original_width}x{original_height} -> {initial_zoomed_model.size} (zoom factor: {initial_zoom_factor:.1f})")
             
-            if jewelry_size and isinstance(jewelry_size, dict):
-                jewelry_size_str = jewelry_size.get('size', '20mm')
-            elif jewelry_size and isinstance(jewelry_size, str):
-                jewelry_size_str = jewelry_size
-            else:
-                jewelry_size_str = '20mm'
+            model_height_cm = get_image_height_cm(initial_zoomed_temp_path, jewelry_type)
+            jewelry_size_cm = get_jewelry_size_cm(jewelry_size, jewelry_temp_path, jewelry_type)
+            print(f"[ImageProcessor] Step 6: Calculated sizes - model height: {model_height_cm}cm, jewelry size: {jewelry_size_cm}cm")
             
-            jewelry_size_mm = calculate_jewelry_size_mm(jewelry_size_str)
-            jewelry_width_px, jewelry_height_px = final_jewelry.size
-
-            model_img = Image.open(model_temp_path)
-            model_width_px, model_height_px = model_img.size
-        
-            target_jewelry_height_px = (jewelry_size_mm * model_height_px) / model_height_mm
-            scale_factor = target_jewelry_height_px / jewelry_height_px
-            
-            if scale_factor < 0.1 or scale_factor > 10:
-                jewelry_type_lower = jewelry_type.lower()
-                if jewelry_type_lower in ['earring', 'earrings']:
-                    target_percentage = 0.08
-                elif jewelry_type_lower in ['necklace', 'pendant']:
-                    target_percentage = 0.15
-                elif jewelry_type_lower in ['bracelet', 'bangles']:
-                    target_percentage = 0.12
-                elif jewelry_type_lower in ['ring', 'rings']:
-                    target_percentage = 0.06
-                else:
-                    target_percentage = 0.10
-                
-                target_jewelry_height_px = model_height_px * target_percentage
-                scale_factor = target_jewelry_height_px / jewelry_height_px
+            initial_zoomed_model_img = Image.open(initial_zoomed_temp_path)
+            model_width_px, model_height_px = initial_zoomed_model_img.size
+            jewelry_width_px, jewelry_height_px = cropped_jewelry.size
+            model_cm_to_px = model_height_cm / model_height_px
+            jewelry_cm_to_px = jewelry_size_cm / jewelry_height_px
+            scale_factor = jewelry_cm_to_px / model_cm_to_px
+            print(f"[ImageProcessor] Step 7: Initial jewelry scaling, model cm to px: {model_cm_to_px}, jewelry cm to px: {jewelry_cm_to_px}, scale factor: {scale_factor:.3f}")
             
             new_jewelry_width = int(jewelry_width_px * scale_factor)
             new_jewelry_height = int(jewelry_height_px * scale_factor)
+            resized_jewelry = cropped_jewelry.resize((new_jewelry_width, new_jewelry_height), Image.BICUBIC)
+            print(f"[ImageProcessor] Step 8: Resized jewelry - {jewelry_width_px}x{jewelry_height_px} -> {new_jewelry_width}x{new_jewelry_height}")
             
-            resized_jewelry = final_jewelry.resize((new_jewelry_width, new_jewelry_height), Image.Resampling.LANCZOS)
-            
-            print(f"[ImageProcessor] Jewelry resized: {jewelry_width_px}x{jewelry_height_px} -> {new_jewelry_width}x{new_jewelry_height} (scale: {scale_factor:.2f})")
-            
-            landmark_position = get_jewelry_placement_position(zoomed_model_temp_path, jewelry_type)
-            
+        
+            landmark_position = get_jewelry_placement_position(initial_zoomed_temp_path, jewelry_type)
             if not isinstance(landmark_position, dict):
-                model_img = Image.open(zoomed_model_temp_path)
+                model_img = Image.open(initial_zoomed_temp_path)
                 width, height = model_img.size
-                
-                jt = jewelry_type.lower()
-                if jt in ['necklace', 'pendant']:
-                    landmark_position = {'x': width // 2, 'y': height // 3, 'confidence': 0.5, 'method': 'fallback'}
-                elif jt in ['earring', 'earrings']:
-                    landmark_position = {'x': width // 4, 'y': height // 4, 'confidence': 0.5, 'method': 'fallback'}
-                elif jt in ['bracelet', 'bangles']:
-                    landmark_position = {'x': width // 2, 'y': int(height * 0.7), 'confidence': 0.5, 'method': 'fallback'}
-                elif jt in ['ring', 'rings']:
-                    landmark_position = {'x': int(width * 0.6), 'y': int(height * 0.8), 'confidence': 0.5, 'method': 'fallback'}
-                else:
-                    landmark_position = {'x': width // 2, 'y': height // 2, 'confidence': 0.3, 'method': 'fallback'}
-
+            print(f"[ImageProcessor] Step 11: Detected landmark position - {landmark_position}")
+            
             processed_jewelry_url = None
             processed_jewelry_with_bg_url = None
             
@@ -643,12 +938,12 @@ class ImageProcessor:
                 processed_jewelry_with_bg_url = f"data:image/png;base64,{jewelry_base64}"
                 
                 model_bytes = io.BytesIO()
-                zoomed_model.save(model_bytes, format='PNG')
+                initial_zoomed_model_img.save(model_bytes, format='PNG')
                 model_bytes.seek(0)
                 model_base64 = base64.b64encode(model_bytes.getvalue()).decode('utf-8')
                 model_image_url = f"data:image/png;base64,{model_base64}"
                 
-                print(f"[ImageProcessor] Created base64 data URLs for processed images")
+                print(f"[ImageProcessor] Step 12: Created base64 URLs - jewelry: {len(jewelry_base64)} chars, model: {len(model_base64)} chars")
                 
             except Exception as e:
                 print(f"[ImageProcessor] Error creating base64 data URLs: {str(e)}")
@@ -657,13 +952,33 @@ class ImageProcessor:
                 processed_jewelry_with_bg_url = jewelry_image_url
                 model_image_url = model_image_url
 
-            try:
-                temp_files = [jewelry_temp_path, model_temp_path, zoomed_model_temp_path]
-                for temp_file in temp_files:
-                    if temp_file and os.path.exists(temp_file):
-                        os.unlink(temp_file)
-            except Exception:
-                pass
+            # Clean up temp files
+            temp_files = []
+            for temp_path in [jewelry_temp_path, model_temp_path]:
+                if temp_path and os.path.exists(temp_path):
+                    temp_files.append(temp_path)
+                    try:
+                        os.unlink(temp_path)
+                    except Exception:
+                        pass
+            
+            # Add zoomed model temp file if it exists
+            if 'zoomed_model_temp_path' in locals() and zoomed_model_temp_path and os.path.exists(zoomed_model_temp_path):
+                temp_files.append(zoomed_model_temp_path)
+                try:
+                    os.unlink(zoomed_model_temp_path)
+                except Exception:
+                    pass
+            
+            # Add resized jewelry temp file if it exists
+            if 'resized_jewelry_temp_path' in locals() and resized_jewelry_temp_path and os.path.exists(resized_jewelry_temp_path):
+                temp_files.append(resized_jewelry_temp_path)
+                try:
+                    os.unlink(resized_jewelry_temp_path)
+                except Exception:
+                    pass
+
+            print(f"[ImageProcessor] Step 15: Cleaned temp files - {len(temp_files)} files removed")
 
             result = convert_numpy_types({
                 'processed_jewelry_url': processed_jewelry_url,
@@ -675,11 +990,49 @@ class ImageProcessor:
                 'processing_info': {
                     'original_jewelry_size': len(jewelry_data),
                     'model_size': len(model_data),
-                    'model_height_mm': model_height_mm,
-                    'jewelry_size_mm': jewelry_size_mm,
+                    'model_height_cm': model_height_cm,
+                    'jewelry_size_cm': jewelry_size_cm,
                     'scale_factor': scale_factor
                 }
             })
+
+            if result:
+                print(f"\n✅ Success!")
+                print(f"Processed jewelry URL: {result['processed_jewelry_url'][:100]}...")
+                print(f"Model image URL: {result['model_image_url'][:100]}...")
+                print(f"Landmark position: {result['landmark_position']}")
+                print(f"Processing info: {result['processing_info']}")
+            
+            try:
+                jewelry_base64 = result['processed_jewelry_url'].split(',')[1]
+                model_base64 = result['model_image_url'].split(',')[1]
+                
+                jewelry_data = base64.b64decode(jewelry_base64)
+                model_data = base64.b64decode(model_base64)
+                
+                jewelry_img = Image.open(io.BytesIO(jewelry_data))
+                model_img = Image.open(io.BytesIO(model_data))
+                
+                position = result['landmark_position']
+                x, y = position['x'], position['y']
+                
+                jewelry_width, jewelry_height = jewelry_img.size
+                x_offset = x - jewelry_width // 2
+                y_offset = y - jewelry_height // 10
+                
+                # x_offset = x - jewelry_width // 2
+                # y_offset = y - jewelry_height // 2
+                
+                result_img = model_img.copy()
+                if jewelry_img.mode == 'RGBA':
+                    result_img.paste(jewelry_img, (x_offset, y_offset), jewelry_img)
+                else:
+                    result_img.paste(jewelry_img, (x_offset, y_offset))
+                
+                result_img.save('virtual_tryon_result.png')
+                print(f"✅ Overlay image saved as 'virtual_tryon_result.png'")
+            except Exception as e:
+                print(f"\n❌ Failed: No result returned")
             
             print(f"[ImageProcessor] Virtual try-on processing completed successfully")
             
@@ -696,4 +1049,3 @@ class ImageProcessor:
         except Exception as e:
             print(f"[ImageProcessor] Virtual try-on processing failed: {str(e)}")
             return None
-
