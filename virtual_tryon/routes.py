@@ -19,8 +19,7 @@ class VirtualTryOnRequest(BaseModel):
 
 class VirtualTryOnResponse(BaseModel):
     success: bool
-    processed_jewelry_url: str = ""
-    processed_jewelry_with_bg_url: str = ""
+    processed_jewelry: str = ""
     landmark_position: Optional[Dict[str, Any]] = None
     temp_file_ids: Optional[list] = []
     processing_time: float = 0.0
@@ -50,8 +49,7 @@ async def process_virtual_try_on(request: VirtualTryOnRequest):
         
         return {
             "success": True,
-            "processed_jewelry_url": result["processed_jewelry_url"],
-            "processed_jewelry_with_bg_url": result["processed_jewelry_with_bg_url"],
+            "processed_jewelry": result["processed_jewelry"],
             "model_image_url": result["model_image_url"],
             "landmark_position": result["landmark_position"],
             "jewelry_size": result.get("jewelry_size"),

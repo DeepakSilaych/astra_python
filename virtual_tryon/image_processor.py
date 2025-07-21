@@ -887,17 +887,24 @@ class ImageProcessor:
             landmark_position = get_jewelry_placement_position(model_temp_path, jewelry_type)
             print(f"[ImageProcessor] Step 3: Detected landmark position - {landmark_position}")
             
+            # Process jewelry with high quality - keep original cropped size
             cropped_jewelry = crop_jewelry_image(jewelry_temp_path, jewelry_type)
             if cropped_jewelry is None:
-                cropped_jewelry = Image.open(jewelry_temp_path).convert("RGB")
-            print(f"[ImageProcessor] Step 4: Initial jewelry processing - size: {cropped_jewelry.size}")
+                cropped_jewelry = Image.open(jewelry_temp_path).convert("RGBA")
+            else:
+                # Ensure high quality RGBA format
+                if cropped_jewelry.mode != 'RGBA':
+                    cropped_jewelry = cropped_jewelry.convert("RGBA")
+            print(f"[ImageProcessor] Step 4: High-quality jewelry processing - size: {cropped_jewelry.size}")
             
+            # Process model with high quality
+            model_img = model_img.convert("RGB")
             initial_zoom_factor = 0.7
             initial_zoomed_model = apply_zoom_to_landmark(model_img, landmark_position, initial_zoom_factor)
             with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as initial_zoomed_temp:
-                initial_zoomed_model.save(initial_zoomed_temp.name, format='PNG')
+                initial_zoomed_model.save(initial_zoomed_temp.name, format='PNG', quality=95)
                 initial_zoomed_temp_path = initial_zoomed_temp.name
-            print(f"[ImageProcessor] Step 5: Applied initial 20% zoom - {original_width}x{original_height} -> {initial_zoomed_model.size} (zoom factor: {initial_zoom_factor:.1f})")
+            print(f"[ImageProcessor] Step 5: Applied initial zoom with high quality - {original_width}x{original_height} -> {initial_zoomed_model.size}")
             
             model_height_cm = get_image_height_cm(initial_zoomed_temp_path, jewelry_type)
             jewelry_size_cm = get_jewelry_size_cm(jewelry_size, jewelry_temp_path, jewelry_type)
@@ -906,15 +913,20 @@ class ImageProcessor:
             initial_zoomed_model_img = Image.open(initial_zoomed_temp_path)
             model_width_px, model_height_px = initial_zoomed_model_img.size
             jewelry_width_px, jewelry_height_px = cropped_jewelry.size
+            
+            # Calculate scale factor for frontend reference (not for resizing)
             model_cm_to_px = model_height_cm / model_height_px
             jewelry_cm_to_px = jewelry_size_cm / jewelry_height_px
             scale_factor = jewelry_cm_to_px / model_cm_to_px
-            print(f"[ImageProcessor] Step 7: Initial jewelry scaling, model cm to px: {model_cm_to_px}, jewelry cm to px: {jewelry_cm_to_px}, scale factor: {scale_factor:.3f}")
+            print(f"[ImageProcessor] Step 7: Scale factor calculation for frontend - {scale_factor:.3f}")
             
-            new_jewelry_width = int(jewelry_width_px * scale_factor)
-            new_jewelry_height = int(jewelry_height_px * scale_factor)
-            resized_jewelry = cropped_jewelry.resize((new_jewelry_width, new_jewelry_height), Image.BICUBIC)
-            print(f"[ImageProcessor] Step 8: Resized jewelry - {jewelry_width_px}x{jewelry_height_px} -> {new_jewelry_width}x{new_jewelry_height}")
+            # Calculate target jewelry size for frontend (not resizing here)
+            target_jewelry_width = int(jewelry_width_px * scale_factor)
+            target_jewelry_height = int(jewelry_height_px * scale_factor)
+            print(f"[ImageProcessor] Step 8: Target jewelry size for frontend - {jewelry_width_px}x{jewelry_height_px} -> {target_jewelry_width}x{target_jewelry_height}")
+            
+            # Keep original cropped jewelry for high quality
+            final_jewelry = cropped_jewelry
             
         
             landmark_position = get_jewelry_placement_position(initial_zoomed_temp_path, jewelry_type)
@@ -923,19 +935,16 @@ class ImageProcessor:
                 width, height = model_img.size
             print(f"[ImageProcessor] Step 11: Detected landmark position - {landmark_position}")
             
-            processed_jewelry_url = None
-            processed_jewelry_with_bg_url = None
             
             try:
                 import base64
                 
                 jewelry_bytes = io.BytesIO()
-                resized_jewelry.save(jewelry_bytes, format='PNG')
+                final_jewelry.save(jewelry_bytes, format='PNG', quality=95)
                 jewelry_bytes.seek(0)
                 jewelry_base64 = base64.b64encode(jewelry_bytes.getvalue()).decode('utf-8')
                 
-                processed_jewelry_url = f"data:image/png;base64,{jewelry_base64}"
-                processed_jewelry_with_bg_url = f"data:image/png;base64,{jewelry_base64}"
+                processed_jewelry = f"data:image/png;base64,{jewelry_base64}"
                 
                 model_bytes = io.BytesIO()
                 initial_zoomed_model_img.save(model_bytes, format='PNG')
@@ -948,8 +957,7 @@ class ImageProcessor:
             except Exception as e:
                 print(f"[ImageProcessor] Error creating base64 data URLs: {str(e)}")
                 print("[ImageProcessor] Using original image URLs as fallback")
-                processed_jewelry_url = jewelry_image_url
-                processed_jewelry_with_bg_url = jewelry_image_url
+                processed_jewelry = jewelry_image_url
                 model_image_url = model_image_url
 
             # Clean up temp files
@@ -961,28 +969,11 @@ class ImageProcessor:
                         os.unlink(temp_path)
                     except Exception:
                         pass
-            
-            # Add zoomed model temp file if it exists
-            if 'zoomed_model_temp_path' in locals() and zoomed_model_temp_path and os.path.exists(zoomed_model_temp_path):
-                temp_files.append(zoomed_model_temp_path)
-                try:
-                    os.unlink(zoomed_model_temp_path)
-                except Exception:
-                    pass
-            
-            # Add resized jewelry temp file if it exists
-            if 'resized_jewelry_temp_path' in locals() and resized_jewelry_temp_path and os.path.exists(resized_jewelry_temp_path):
-                temp_files.append(resized_jewelry_temp_path)
-                try:
-                    os.unlink(resized_jewelry_temp_path)
-                except Exception:
-                    pass
 
             print(f"[ImageProcessor] Step 15: Cleaned temp files - {len(temp_files)} files removed")
 
             result = convert_numpy_types({
-                'processed_jewelry_url': processed_jewelry_url,
-                'processed_jewelry_with_bg_url': processed_jewelry_with_bg_url,
+                'processed_jewelry': processed_jewelry,
                 'model_image_url': model_image_url,
                 'landmark_position': landmark_position,
                 'jewelry_type': jewelry_type,
@@ -992,19 +983,21 @@ class ImageProcessor:
                     'model_size': len(model_data),
                     'model_height_cm': model_height_cm,
                     'jewelry_size_cm': jewelry_size_cm,
-                    'scale_factor': scale_factor
+                    'scale_factor': scale_factor,
+                    'target_jewelry_width': target_jewelry_width,
+                    'target_jewelry_height': target_jewelry_height,
+                    'original_jewelry_width': jewelry_width_px,
+                    'original_jewelry_height': jewelry_height_px
                 }
             })
 
             if result:
                 print(f"\n✅ Success!")
-                print(f"Processed jewelry URL: {result['processed_jewelry_url'][:100]}...")
                 print(f"Model image URL: {result['model_image_url'][:100]}...")
                 print(f"Landmark position: {result['landmark_position']}")
                 print(f"Processing info: {result['processing_info']}")
             
             try:
-                jewelry_base64 = result['processed_jewelry_url'].split(',')[1]
                 model_base64 = result['model_image_url'].split(',')[1]
                 
                 jewelry_data = base64.b64decode(jewelry_base64)
